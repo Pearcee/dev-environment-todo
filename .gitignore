@@ -160,3 +160,4 @@ cython_debug/
 #.idea/
 secret.txt
 *__pycache__/
+todo.db
