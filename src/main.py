@@ -1,79 +1,90 @@
-import json
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from redis_om import get_redis_connection, HashModel
+from typing import List
+from fastapi import FastAPI, status, HTTPException, Depends
+from .database import Base, engine, SessionLocal
+from sqlalchemy.orm import Session
+from . import models
+from . import schemas
 
-import src.consumers
+# Create the database
+Base.metadata.create_all(engine)
 
+# Initialize app
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=['http://localhost:80'],
-    allow_methods=['*'],
-    allow_headers=['*']
-)
+# Helper function to get database session
+def get_session():
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
 
-redis = get_redis_connection(
-    host="localhost",
-    port=6379,
-    decode_responses=True
-)
+@app.get("/")
+def root():
+    return "todooo"
 
-class Delivery(HashModel):
-    budget: int = 0
-    notes: str = ''
+@app.post("/todo", response_model=schemas.ToDo, status_code=status.HTTP_201_CREATED)
+def create_todo(todo: schemas.ToDoCreate, session: Session = Depends(get_session)):
 
-    class Meta:
-        database = redis
+    # create an instance of the ToDo database model
+    tododb = models.ToDo(task = todo.task)
 
-class Event(HashModel):
-    delivery_id: str = None
-    type: str
-    data: str
+    # add it to the session and commit it
+    session.add(tododb)
+    session.commit()
+    session.refresh(tododb)
 
-    class Meta:
-        database = redis
+    # return the todo object
+    return tododb
 
-@app.get('/deliveries/{pk}/status')
-async def get_state(pk: str):
-    state = redis.get(f'delivery:{pk}')
+@app.get("/todo/{id}", response_model=schemas.ToDo)
+def read_todo(id: int, session: Session = Depends(get_session)):
 
-    if state is not None:
-     return json.loads(state)
+    # get the todo item with the given id
+    todo = session.query(models.ToDo).get(id)
 
-    state = build_state(pk)
-    redis.set(f'delivery:{pk}', json.dumps(state))
+    # check if todo item with given id exists. If not, raise exception and return 404 not found response
+    if not todo:
+        raise HTTPException(status_code=404, detail=f"todo item with id {id} not found")
 
-    return {}
+    return todo
 
-def build_state(pk: str):
-    pks = Event.all_pks()
-    all_events = [Event.get(pk) for pk in pks]
-    events = [event for event in all_events if event.delivery_id == pk]
+@app.put("/todo/{id}", response_model=schemas.ToDo)
+def update_todo(id: int, task: str, session: Session = Depends(get_session)):
 
-    state = {}
+    # get the todo item with the given id
+    todo = session.query(models.ToDo).get(id)
 
-    for event in events:
-        state = consumers.CONSUMERS[event.type](state, event)
+    # update todo item with the given task (if an item with the given id was found)
+    if todo:
+        todo.task = task
+        session.commit()
 
-    return state
+    # check if todo item with given id exists. If not, raise exception and return 404 not found response
+    if not todo:
+        raise HTTPException(status_code=404, detail=f"todo item with id {id} not found")
 
-@app.post('/deliveries/create')
-async def create(request: Request):
-    body = await request.json()
-    delivery = Delivery(budget=body['data']['budget'], notes=body['data']['notes']).save()
-    event = Event(delivery_id=delivery.pk, type=body['type'], data=json.dumps(body['data'])).save()
-    state = consumers.CONSUMERS[event.type]({}, event)
-    redis.set(f'delivery:{delivery.pk}', json.dumps(state))
-    return state
+    return todo
 
-@app.post('/event')
-async def dispatch(request: Request):
-    body = await request.json()
-    delivery_id = body['delivery_id']
-    event = Event(delivery_id=delivery_id, type=body['type'], data=json.dumps(body['data'])).save()
-    state = await get_state(delivery_id)
-    new_state = consumers.CONSUMERS[event.type](state, event)
-    redis.set(f'delivery:{delivery_id}', json.dumps(new_state))
-    return new_state
+@app.delete("/todo/{id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_todo(id: int, session: Session = Depends(get_session)):
+
+    # get the todo item with the given id
+    todo = session.query(models.ToDo).get(id)
+
+    # if todo item with given id exists, delete it from the database. Otherwise raise 404 error
+    if todo:
+        session.delete(todo)
+        session.commit()
+    else:
+        raise HTTPException(status_code=404, detail=f"todo item with id {id} not found")
+
+    return None
+
+@app.get("/todo", response_model = List[schemas.ToDo])
+def read_todo_list(session: Session = Depends(get_session)):
+
+    # get all todo items
+    todo_list = session.query(models.ToDo).all()
+
+    return todo_list
